@@ -1,0 +1,88 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RequestHang = ReplicatedStorage:WaitForChild("Remotes"):FindFirstChild("RequestHang")
+	or Instance.new("RemoteEvent", ReplicatedStorage:WaitForChild("Remotes"))
+RequestHang.Name = "RequestHang"
+
+local MAX_HANG_DISTANCE = 20
+local MAX_WALL_SLOPE_Y  = 0.5
+local HAND_DEPTH        = 0.30
+local HAND_DROP         = 2.2
+
+local function destroyOldHang(character)
+	for _, obj in ipairs(character:GetDescendants()) do
+		if obj:IsA("AlignPosition") or obj:IsA("AlignOrientation") then
+			if obj.Name == "HangAlignPos" or obj.Name == "HangAlignOri" then
+				obj:Destroy()
+			end
+		elseif obj:IsA("Attachment") and (obj.Name == "HangA0" or obj.Name == "HangA1") then
+			obj:Destroy()
+		end
+	end
+end
+
+local function makeHang(character, wallPoint, wallNormal, ledgeTop)
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	local hum = character:FindFirstChildOfClass("Humanoid")
+	if not (hrp and hum) then return end
+	if character:GetAttribute("IsHanging") then return end
+	if (hrp.Position - wallPoint).Magnitude > MAX_HANG_DISTANCE then return end
+	if math.abs(wallNormal.Y) > MAX_WALL_SLOPE_Y then return end
+	local forward = -wallNormal
+	local hangPos = ledgeTop + Vector3.new(0, -HAND_DROP, 0) + wallNormal * HAND_DEPTH
+	local hangCFrame = CFrame.lookAt(hangPos, hangPos + forward)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { workspace.CurrentMap or workspace }
+	params.IgnoreWater = true
+	if workspace:Raycast(hangPos, (-forward) * 0.35, params) then
+		hangPos = hangPos + forward * 0.35
+		hangCFrame = CFrame.lookAt(hangPos, hangPos + forward)
+	end
+	character:SetAttribute("IsHanging", true)
+	destroyOldHang(character)
+	hum:ChangeState(Enum.HumanoidStateType.Physics)
+	hum.AutoRotate = false
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = hangCFrame
+	local a0 = Instance.new("Attachment")
+	a0.Name = "HangA0"
+	a0.Parent = hrp
+	local a1 = Instance.new("Attachment")
+	a1.Name = "HangA1"
+	a1.Parent = workspace.Terrain
+	a1.WorldCFrame = hangCFrame
+	local ap = Instance.new("AlignPosition")
+	ap.Name = "HangAlignPos"
+	ap.Attachment0 = a0
+	ap.Attachment1 = a1
+	ap.Mode = Enum.PositionAlignmentMode.TwoAttachment
+	ap.MaxForce = 1e7
+	ap.Responsiveness = 200
+	ap.ApplyAtCenterOfMass = true
+	ap.Parent = hrp
+	local ao = Instance.new("AlignOrientation")
+	ao.Name = "HangAlignOri"
+	ao.Attachment0 = a0
+	ao.Attachment1 = a1
+	ao.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+	ao.MaxTorque = 1e7
+	ao.Responsiveness = 200
+	ao.Parent = hrp
+	task.delay(12, function()
+		if character:GetAttribute("IsHanging") then
+			character:SetAttribute("IsHanging", false)
+			destroyOldHang(character)
+			if hum.Parent then
+				hum.AutoRotate = true
+				hum:ChangeState(Enum.HumanoidStateType.Freefall)
+			end
+		end
+	end)
+end
+
+RequestHang.OnServerEvent:Connect(function(player, data)
+	if not (player and data) then return end
+	local char = player.Character
+	if not char then return end
+	makeHang(char, data.wallPoint, data.wallNormal, data.ledgeTop)
+end)
