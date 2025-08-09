@@ -1,88 +1,97 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RequestHang = ReplicatedStorage:WaitForChild("Remotes"):FindFirstChild("RequestHang")
-	or Instance.new("RemoteEvent", ReplicatedStorage:WaitForChild("Remotes"))
-RequestHang.Name = "RequestHang"
+local UserInputService = game:GetService("UserInputService")
+local player = Players.LocalPlayer
 
-local MAX_HANG_DISTANCE = 20
-local MAX_WALL_SLOPE_Y  = 0.5
-local HAND_DEPTH        = 0.30
-local HAND_DROP         = 2.2
+local RequestHang = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("RequestHang")
 
-local function destroyOldHang(character)
-	for _, obj in ipairs(character:GetDescendants()) do
-		if obj:IsA("AlignPosition") or obj:IsA("AlignOrientation") then
-			if obj.Name == "HangAlignPos" or obj.Name == "HangAlignOri" then
-				obj:Destroy()
-			end
-		elseif obj:IsA("Attachment") and (obj.Name == "HangA0" or obj.Name == "HangA1") then
-			obj:Destroy()
-		end
+local DROP_THRESHOLD = 30
+local REACH = 6
+local LEDGE_UP_SCAN = 10
+local FORWARD_PROBE_RADIUS = 0.9
+local CHEST_OFFSET = Vector3.new(0, 2, 0)
+
+local DEBUG_ENABLED = false
+local vizFolder = Instance.new("Folder"); vizFolder.Name = "LedgeHangViz"; vizFolder.Parent = workspace
+local function makePart(n)local p=Instance.new("Part");p.Name=n;p.Anchored=true;p.CanCollide=false;p.CanQuery=false;p.CanTouch=false;p.Transparency=1;p.Size=Vector3.new(0.2,0.2,0.2);p.Parent=vizFolder;return p end
+local function beam(aPos,bPos,w,c)local a=makePart("A");a.CFrame=CFrame.new(aPos);local b=makePart("B");b.CFrame=CFrame.new(bPos);local A0=Instance.new("Attachment",a);local A1=Instance.new("Attachment",b);local B=Instance.new("Beam");B.Attachment0=A0;B.Attachment1=A1;B.Width0=w;B.Width1=w;B.LightEmission=1;B.Color=ColorSequence.new(c);B.Transparency=NumberSequence.new(0);B.Segments=1;B.FaceCamera=true;B.Parent=vizFolder;return B end
+local function sphere(pos,r,c)local s=Instance.new("SphereHandleAdornment");s.Radius=r;s.Color3=c;s.AlwaysOnTop=true;s.Adornee=makePart("Adornee");s.Adornee.CFrame=CFrame.new(pos);s.ZIndex=5;s.Parent=vizFolder;return s end
+local function clearViz() vizFolder:ClearAllChildren() end
+UserInputService.InputBegan:Connect(function(i,gp) if gp then return end if i.KeyCode==Enum.KeyCode.E then DEBUG_ENABLED=not DEBUG_ENABLED if not DEBUG_ENABLED then clearViz() end end end)
+
+local function isVerticalWall(n) return math.abs(n.Y) < 0.25 end
+local function getCharParts(c) local hrp=c:FindFirstChild("HumanoidRootPart"); local hum=c:FindFirstChildOfClass("Humanoid"); return hrp,hum end
+local function downwardHit(origin,dist,include) local p=RaycastParams.new(); p.FilterType=Enum.RaycastFilterType.Include; p.FilterDescendantsInstances=include; p.IgnoreWater=true; return workspace:Raycast(origin, Vector3.new(0,-dist,0), p) end
+
+local function multiRaySpherecast(origin,dir,radius,dist,include)
+	local right=Vector3.new(1,0,0); local up=Vector3.new(0,1,0)
+	local offsets={Vector3.new(), right*radius, -right*radius, up*radius, -up*radius,
+		(right+up).Unit*radius, (right-up).Unit*radius, (-right+up).Unit*radius, (-right-up).Unit*radius}
+	local p=RaycastParams.new(); p.FilterType=Enum.RaycastFilterType.Include; p.FilterDescendantsInstances=include; p.IgnoreWater=true
+	local best
+	for _,o in ipairs(offsets) do
+		if DEBUG_ENABLED then beam(origin+o, origin+o+dir.Unit*dist, 0.05, Color3.new(1,1,0)) end
+		local h=workspace:Raycast(origin+o, dir.Unit*dist, p)
+		if h and (not best or h.Distance<best.Distance) then best=h end
 	end
+	return best
 end
 
-local function makeHang(character, wallPoint, wallNormal, ledgeTop)
-	local hrp = character:FindFirstChild("HumanoidRootPart")
-	local hum = character:FindFirstChildOfClass("Humanoid")
-	if not (hrp and hum) then return end
-	if character:GetAttribute("IsHanging") then return end
-	if (hrp.Position - wallPoint).Magnitude > MAX_HANG_DISTANCE then return end
-	if math.abs(wallNormal.Y) > MAX_WALL_SLOPE_Y then return end
-	local forward = -wallNormal
-	local hangPos = ledgeTop + Vector3.new(0, -HAND_DROP, 0) + wallNormal * HAND_DEPTH
-	local hangCFrame = CFrame.lookAt(hangPos, hangPos + forward)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Include
-	params.FilterDescendantsInstances = { workspace.CurrentMap or workspace }
-	params.IgnoreWater = true
-	if workspace:Raycast(hangPos, (-forward) * 0.35, params) then
-		hangPos = hangPos + forward * 0.35
-		hangCFrame = CFrame.lookAt(hangPos, hangPos + forward)
-	end
-	character:SetAttribute("IsHanging", true)
-	destroyOldHang(character)
-	hum:ChangeState(Enum.HumanoidStateType.Physics)
-	hum.AutoRotate = false
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.CFrame = hangCFrame
-	local a0 = Instance.new("Attachment")
-	a0.Name = "HangA0"
-	a0.Parent = hrp
-	local a1 = Instance.new("Attachment")
-	a1.Name = "HangA1"
-	a1.Parent = workspace.Terrain
-	a1.WorldCFrame = hangCFrame
-	local ap = Instance.new("AlignPosition")
-	ap.Name = "HangAlignPos"
-	ap.Attachment0 = a0
-	ap.Attachment1 = a1
-	ap.Mode = Enum.PositionAlignmentMode.TwoAttachment
-	ap.MaxForce = 1e7
-	ap.Responsiveness = 200
-	ap.ApplyAtCenterOfMass = true
-	ap.Parent = hrp
-	local ao = Instance.new("AlignOrientation")
-	ao.Name = "HangAlignOri"
-	ao.Attachment0 = a0
-	ao.Attachment1 = a1
-	ao.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-	ao.MaxTorque = 1e7
-	ao.Responsiveness = 200
-	ao.Parent = hrp
-	task.delay(12, function()
-		if character:GetAttribute("IsHanging") then
-			character:SetAttribute("IsHanging", false)
-			destroyOldHang(character)
-			if hum.Parent then
-				hum.AutoRotate = true
-				hum:ChangeState(Enum.HumanoidStateType.Freefall)
-			end
-		end
-	end)
+local function getProbeDirections(hrp)
+	local cf=hrp.CFrame; local look=cf.LookVector; local right=cf.RightVector
+	local v=hrp.AssemblyLinearVelocity; local hv=Vector3.new(v.X,0,v.Z)
+	local d={}
+	if hv.Magnitude>2 then table.insert(d, -hv.Unit) end
+	table.insert(d, -look); table.insert(d, look); table.insert(d, right); table.insert(d, -right)
+	table.insert(d, (look+right).Unit); table.insert(d, (look-right).Unit)
+	table.insert(d, (-look+right).Unit); table.insert(d, (-look-right).Unit)
+	return d
 end
 
-RequestHang.OnServerEvent:Connect(function(player, data)
-	if not (player and data) then return end
-	local char = player.Character
-	if not char then return end
-	makeHang(char, data.wallPoint, data.wallNormal, data.ledgeTop)
+local function lipAboveWallHit(wallHit, include)
+	local p=RaycastParams.new(); p.FilterType=Enum.RaycastFilterType.Include; p.FilterDescendantsInstances=include; p.IgnoreWater=true
+	local back = -wallHit.Normal
+	local start = wallHit.Position + back * 0.35 + Vector3.new(0, LEDGE_UP_SCAN + 6, 0)
+	local down = workspace:Raycast(start, Vector3.new(0, -(LEDGE_UP_SCAN + 14), 0), p)
+	if DEBUG_ENABLED then sphere(start, 0.2, Color3.new(1,0.6,0)); if down then sphere(down.Position,0.25,Color3.new(0,1,0)) end end
+	if not down or down.Normal.Y <= 0.75 then return nil end
+	local hrp = (Players.LocalPlayer.Character or {}).HumanoidRootPart
+	if hrp then
+		local dy = down.Position.Y - hrp.Position.Y
+		if dy < 1.0 or dy > 6.0 then return nil end
+	end
+	return down
+end
+
+local lastVizTick=0
+RunService.Heartbeat:Connect(function(dt)
+	local char=player.Character; if not char or not char.Parent then return end
+	local hrp,hum=getCharParts(char); if not hrp or not hum then return end
+	if DEBUG_ENABLED then lastVizTick=lastVizTick+dt; if lastVizTick>0.05 then clearViz(); lastVizTick=0 end end
+	if hum:GetState()~=Enum.HumanoidStateType.Freefall then return end
+	if hrp.AssemblyLinearVelocity.Y >= -4 then return end
+	local include={workspace.CurrentMap or workspace}
+	local feet=hrp.Position+Vector3.new(0,-2.5,0)
+	if DEBUG_ENABLED then beam(feet, feet+Vector3.new(0,-DROP_THRESHOLD,0), 0.08, Color3.new(1,1,1)) end
+	if downwardHit(feet, DROP_THRESHOLD, include) then
+		if DEBUG_ENABLED then local h=downwardHit(feet, DROP_THRESHOLD, include); if h then sphere(h.Position,0.2,Color3.new(1,0,0)) end end
+		return
+	end
+	local chest=hrp.Position+CHEST_OFFSET
+	local wallHit
+	for _,dir in ipairs(getProbeDirections(hrp)) do
+		local h=multiRaySpherecast(chest, dir, FORWARD_PROBE_RADIUS, REACH, include)
+		if h and isVerticalWall(h.Normal) then wallHit=h; break end
+	end
+	if not wallHit then return end
+	if DEBUG_ENABLED then sphere(wallHit.Position,0.25,Color3.new(0.3,0.6,1)); beam(chest, wallHit.Position, 0.06, Color3.new(0.3,0.6,1)) end
+	local lip = lipAboveWallHit(wallHit, include)
+	if not lip then return end
+	if DEBUG_ENABLED then local preview = lip.Position + Vector3.new(0,-2.2,0) - wallHit.Normal*0.30; sphere(preview, 0.22, Color3.new(0,1,0)) end
+	RequestHang:FireServer({
+		wallPoint = wallHit.Position,
+		wallNormal = wallHit.Normal,
+		ledgeTop  = lip.Position
+	})
 end)
